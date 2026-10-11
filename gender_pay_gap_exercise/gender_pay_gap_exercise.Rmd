@@ -1,0 +1,391 @@
+---
+title: "Is There a Gender Pay Gap?"
+subtitle: "Replication code for the 2025-26 UK gender pay gap data"
+author: "Deyu Wang (5796695)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float:
+      collapsed: false
+    number_sections: true
+    code_folding: show
+    fig_width: 8
+    fig_height: 5
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  dpi = 150
+)
+```
+
+```{r packages}
+library(tidyverse)   # dplyr, ggplot2, readr, ...
+library(lubridate)   # date handling for the stretch task
+library(scales)      # nice axis labels
+library(knitr)       # kable() for tables
+```
+
+```{r helpers}
+# Formatting helpers, so I can quote numbers inline instead of typing them out.
+
+# p value in APA format
+fmt_p <- function(p) {
+  if (p < .001) "< .001" else paste0("= ", sub("^0", "", sprintf("%.3f", p)))
+}
+
+# Round to 2 dp, no scientific notation
+r2 <- function(x) formatC(x, format = "f", digits = 2)
+```
+
+# The data
+
+The data are the full set of employer returns to the UK Government's
+[gender pay gap service](https://gender-pay-gap.service.gov.uk/viewing/download-data/2025)
+for the 2025-26 reporting year. Every UK employer with 250 or more employees
+must report, so this is close to a census of large employers rather than a
+sample of them.
+
+```{r read-data}
+pay.gap <- read_csv("UK_gender_pay_gap_2025-26.csv")
+
+pay.gap
+```
+
+```{r dims}
+n.employers <- nrow(pay.gap)
+n.variables <- ncol(pay.gap)
+```
+
+The file contains `r comma(n.employers)` employers and `r n.variables` variables.
+
+# Data dictionary
+
+My understanding of what each variable actually is. The pay gap variables are
+all *percentages of the male figure*, so a **positive** number means women are
+paid **less** than men.
+
+| Variable | Type | What I think it is |
+|:----------------------------|:----------|:-----------------------------------------------------------|
+| `EmployerName` | character | Name of the reporting employer, as submitted |
+| `EmployerId` | numeric | Identifier for the employer on the pay gap service |
+| `Address` | character | Registered address of the employer |
+| `PostCode` | character | Postcode of that address |
+| `CompanyNumber` | character | Companies House registration number; blank for some public bodies |
+| `SicCodes` | character | Standard Industrial Classification code(s) for what the employer does; several codes can appear in one cell |
+| `DiffMeanHourlyPercent` | numeric | **Outcome of interest.** (male mean - female mean) / male mean x 100 for hourly pay. A value of 10 means women earn 10% less per hour on average |
+| `DiffMedianHourlyPercent` | numeric | The same calculation on the *median* hourly rate |
+| `DiffMeanBonusPercent` | numeric | The same calculation on *mean* bonus pay; missing where no bonuses were paid |
+| `DiffMedianBonusPercent` | numeric | The same calculation on *median* bonus pay |
+| `MaleBonusPercent` | numeric | Percentage of male employees who received a bonus |
+| `FemaleBonusPercent` | numeric | Percentage of female employees who received a bonus |
+| `MaleLowerQuartile` | numeric | Percentage of the lowest-paid quarter of employees who are men |
+| `FemaleLowerQuartile` | numeric | Percentage of the lowest-paid quarter who are women |
+| `MaleLowerMiddleQuartile` | numeric | Percentage of the second-lowest-paid quarter who are men |
+| `FemaleLowerMiddleQuartile` | numeric | Percentage of the second-lowest-paid quarter who are women |
+| `MaleUpperMiddleQuartile` | numeric | Percentage of the second-highest-paid quarter who are men |
+| `FemaleUpperMiddleQuartile` | numeric | Percentage of the second-highest-paid quarter who are women |
+| `MaleTopQuartile` | numeric | Percentage of the highest-paid quarter who are men |
+| `FemaleTopQuartile` | numeric | Percentage of the highest-paid quarter who are women |
+| `CompanyLinkToGPGInfo` | character | URL where the employer published its own commentary on the figures |
+| `ResponsiblePerson` | character | Name and job title of the person signing off the return |
+| `EmployerSize` | character | Banded headcount, e.g. "250 to 499", "1000 to 4999"; a label, not a number |
+| `CurrentName` | character | Current name of the employer, which can differ from `EmployerName` after a rename |
+| `SubmittedAfterTheDeadline` | logical | Whether the return arrived after the employer's due date |
+| `DueDate` | datetime | Reporting deadline: 31 March 2026 for public sector employers, 5 April 2026 for businesses and charities. Used to derive sector below |
+| `DateSubmitted` | datetime | When the return was actually submitted |
+
+Table: **Table 1.** Data dictionary for `UK_gender_pay_gap_2025-26.csv`.
+
+# The mean gender pay gap
+
+```{r summarise-gap}
+gap.summary <- pay.gap %>%
+  summarise(
+    n = n(),
+    missing = sum(is.na(DiffMeanHourlyPercent)),
+    mean = mean(DiffMeanHourlyPercent),
+    sd = sd(DiffMeanHourlyPercent),
+    median = median(DiffMeanHourlyPercent),
+    min = min(DiffMeanHourlyPercent),
+    max = max(DiffMeanHourlyPercent)
+  )
+
+gap.summary %>%
+  kable(digits = 2,
+        caption = "Table 2. Mean hourly gender pay gap across UK employers (%).")
+```
+
+```{r gap-objects}
+mean.gap <- gap.summary$mean
+sd.gap <- gap.summary$sd
+median.gap <- gap.summary$median
+
+# How one-sided is the distribution?
+pct.favour.men <- mean(pay.gap$DiffMeanHourlyPercent > 0) * 100
+pct.favour.women <- mean(pay.gap$DiffMeanHourlyPercent < 0) * 100
+```
+
+Across the `r comma(n.employers)` employers the mean hourly pay gap is
+**`r r2(mean.gap)`%** (*SD* = `r r2(sd.gap)`, median = `r r2(median.gap)`%).
+At `r r2(pct.favour.men)`% of employers women are paid less per hour on average
+than men, against `r r2(pct.favour.women)`% where they are paid more.
+
+# Figure
+
+```{r clipped-count}
+# How many employers fall outside the plotted range?
+n.clipped <- sum(pay.gap$DiffMeanHourlyPercent < -40 |
+                 pay.gap$DiffMeanHourlyPercent > 60)
+
+n.clipped
+```
+
+```{r figure-1, fig.cap="**Figure 1.** Distribution of the mean hourly gender pay gap across 11,187 UK employers reporting for the 2025-26 year. Positive values mean women are paid less per hour than men. The dashed line marks parity and the solid line the mean gap of 11.50%. The x axis is clipped at -40% and +60% for legibility; 121 employers fall outside this range and are retained in all calculations."}
+
+ggplot(pay.gap, aes(x = DiffMeanHourlyPercent)) +
+  # shade the half of the scale on which women are worse off
+  annotate("rect",
+           xmin = 0, xmax = Inf, ymin = 0, ymax = Inf,
+           fill = "#C2185B", alpha = 0.05) +
+  geom_histogram(binwidth = 2, boundary = 0,
+                 fill = "#4C72B0", colour = "white", linewidth = 0.2) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             colour = "grey30", linewidth = 0.6) +
+  geom_vline(xintercept = mean.gap,
+             colour = "#C2185B", linewidth = 0.9) +
+  annotate("text", x = mean.gap + 1.5, y = Inf,
+           label = paste0("Mean gap = ", r2(mean.gap), "%"),
+           hjust = 0, vjust = 1.8, colour = "#C2185B",
+           fontface = "bold", size = 3.8) +
+  annotate("text", x = -1.5, y = Inf, label = "Equal pay",
+           hjust = 1, vjust = 1.8, colour = "grey30", size = 3.5) +
+  coord_cartesian(xlim = c(-40, 60)) +
+  scale_x_continuous(breaks = seq(-40, 60, 20),
+                     labels = function(x) paste0(x, "%")) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.08))) +
+  labs(
+    title = "At most large UK employers, women earn less per hour than men",
+    subtitle = "Mean hourly pay gap reported by 11,187 employers, 2025-26 reporting year",
+    x = "Mean hourly pay gap  (positive = women paid less)",
+    y = "Number of employers",
+    caption = "Data: UK Government gender pay gap service"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(colour = "grey35", margin = margin(b = 10)),
+    plot.caption = element_text(colour = "grey45", hjust = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.title = element_text(colour = "grey25"),
+    plot.margin = margin(12, 16, 12, 12)
+  )
+```
+
+# What hypothesis is the *t*-test testing?
+
+The unit of analysis is the **employer**, not the employee. Each employer
+contributes exactly one number: its own mean hourly pay gap, in percent.
+
+* **Null hypothesis.** In the population of large UK employers the mean of the
+  employer-level hourly pay gap is zero. Employers may deviate from parity in
+  either direction, but on average men's and women's mean hourly pay is the
+  same.
+
+* **Alternative hypothesis.** The population mean of the employer-level pay
+  gap is not zero. This is two-tailed: the direction was not fixed in advance.
+
+A one-sample *t*-test is the right test because there is a single sample of
+employer-level values and a theoretically meaningful comparison value of zero,
+which is exactly parity. The test asks how far the observed mean sits from
+zero in units of the standard error of the mean, and the *t* distribution with
+*n* - 1 degrees of freedom gives the probability of a difference at least this
+large if the null hypothesis were true.
+
+The test assumes that observations are independent, which holds because there
+is one return per employer, and that the sampling distribution of the mean is
+approximately normal. The raw distribution in Figure 1 is heavy-tailed rather
+than normal, but with *n* = `r comma(n.employers)` the central limit theorem
+makes the test robust to that.
+
+# The *t*-test
+
+```{r t-test-1}
+gap.test <- t.test(pay.gap$DiffMeanHourlyPercent, mu = 0)
+
+gap.test
+```
+
+```{r t-test-1-objects}
+t1 <- gap.test$statistic
+df1 <- gap.test$parameter
+p1 <- gap.test$p.value
+ci1 <- gap.test$conf.int
+d1 <- mean.gap / sd.gap   # Cohen's d for a one-sample test
+```
+
+# What the test tells us
+
+Women at large UK employers were paid significantly less per hour than men.
+The mean hourly pay gap across employers was `r r2(mean.gap)`% in women's
+disfavour (*SD* = `r r2(sd.gap)`), reliably greater than the 0% that equal pay
+would produce, *t*(`r format(df1, scientific = FALSE)`) = `r r2(t1)`, *p* `r fmt_p(p1)`,
+95% CI [`r r2(ci1[1])`, `r r2(ci1[2])`], *d* = `r r2(d1)`. Put another way, a
+typical large UK employer pays women about 11 to 12 pence less for every pound
+it pays men. So I reject the null hypothesis.
+
+# Stretch task: public sector versus business and charity
+
+Public sector employers had to report by 31 March 2026, businesses and
+charities by 5 April 2026, so `DueDate` identifies the sector.
+
+```{r make-sector}
+pay.gap <- pay.gap %>%
+  mutate(
+    DueDate = ymd_hms(DueDate),
+    Sector = ifelse(DueDate == ymd("2026-03-31"),
+                    "Public Sector", "Business / Charity")
+  )
+
+sector.summary <- pay.gap %>%
+  group_by(Sector) %>%
+  summarise(
+    n = n(),
+    mean = mean(DiffMeanHourlyPercent),
+    sd = sd(DiffMeanHourlyPercent),
+    median = median(DiffMeanHourlyPercent),
+    IQR = IQR(DiffMeanHourlyPercent),
+    pct.favour.women = mean(DiffMeanHourlyPercent < 0) * 100,
+    .groups = "drop"
+  )
+
+sector.summary %>%
+  kable(digits = 2,
+        caption = "Table 3. Mean hourly gender pay gap by sector (%).")
+```
+
+```{r sector-objects}
+mean.pub <- sector.summary$mean[sector.summary$Sector == "Public Sector"]
+mean.biz <- sector.summary$mean[sector.summary$Sector == "Business / Charity"]
+sd.pub <- sector.summary$sd[sector.summary$Sector == "Public Sector"]
+sd.biz <- sector.summary$sd[sector.summary$Sector == "Business / Charity"]
+n.pub <- sector.summary$n[sector.summary$Sector == "Public Sector"]
+n.biz <- sector.summary$n[sector.summary$Sector == "Business / Charity"]
+iqr.pub <- sector.summary$IQR[sector.summary$Sector == "Public Sector"]
+iqr.biz <- sector.summary$IQR[sector.summary$Sector == "Business / Charity"]
+neg.pub <- sector.summary$pct.favour.women[sector.summary$Sector == "Public Sector"]
+neg.biz <- sector.summary$pct.favour.women[sector.summary$Sector == "Business / Charity"]
+```
+
+```{r figure-2, fig.cap="**Figure 2.** Mean hourly gender pay gap by sector. Violins show the shape of each distribution, boxes the median and interquartile range, and the white diamonds the sector means with 95% confidence intervals. Public sector employers report a slightly larger average gap than businesses and charities, and fewer of them sit below the parity line. The y axis is clipped at -30% and +50% for legibility; all observations are retained in the analysis."}
+
+ggplot(pay.gap, aes(x = Sector, y = DiffMeanHourlyPercent, fill = Sector)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey30") +
+  geom_violin(alpha = 0.35, colour = NA, width = 0.9) +
+  geom_boxplot(width = 0.14, outlier.shape = NA,
+               fill = "white", colour = "grey25", linewidth = 0.4) +
+  stat_summary(fun.data = mean_cl_normal, geom = "pointrange",
+               shape = 23, size = 0.7, fill = "white",
+               colour = "grey10", linewidth = 0.8) +
+  geom_text(data = sector.summary,
+            aes(x = Sector, y = mean,
+                label = paste0("M = ", r2(mean), "%")),
+            inherit.aes = FALSE,
+            hjust = -0.45, vjust = 0.4, fontface = "bold",
+            colour = "grey10", size = 3.6) +
+  geom_text(data = sector.summary,
+            aes(x = Sector, y = -30, label = paste0("n = ", comma(n))),
+            inherit.aes = FALSE,
+            vjust = -0.4, colour = "grey45", size = 3.2) +
+  coord_cartesian(ylim = c(-30, 50)) +
+  scale_y_continuous(breaks = seq(-30, 50, 10),
+                     labels = function(x) paste0(x, "%")) +
+  scale_fill_manual(values = c("Business / Charity" = "#4C72B0",
+                               "Public Sector" = "#DD8452")) +
+  labs(
+    title = "The public sector does not do better",
+    subtitle = "Mean hourly gender pay gap by sector, 2025-26 reporting year",
+    x = NULL,
+    y = "Mean hourly pay gap  (positive = women paid less)",
+    caption = "Data: UK Government gender pay gap service"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(colour = "grey35", margin = margin(b = 10)),
+    plot.caption = element_text(colour = "grey45", hjust = 0),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    axis.text.x = element_text(face = "bold", size = 11),
+    plot.margin = margin(12, 16, 12, 12)
+  )
+```
+
+```{r t-test-2}
+sector.test <- t.test(DiffMeanHourlyPercent ~ Sector, data = pay.gap)
+
+sector.test
+```
+
+```{r t-test-2-objects}
+t2 <- sector.test$statistic
+df2 <- sector.test$parameter
+p2 <- sector.test$p.value
+ci2 <- sector.test$conf.int   # Business / Charity minus Public Sector
+
+# Pooled SD, for an effect size on the difference
+s.pooled <- sqrt(((n.biz - 1) * sd.biz^2 + (n.pub - 1) * sd.pub^2) /
+                 (n.biz + n.pub - 2))
+d2 <- (mean.pub - mean.biz) / s.pooled
+```
+
+Contrary to what you might expect, public sector employers reported a
+*significantly larger* mean hourly pay gap (*M* = `r r2(mean.pub)`%,
+*SD* = `r r2(sd.pub)`, *n* = `r comma(n.pub)`) than businesses and charities
+(*M* = `r r2(mean.biz)`%, *SD* = `r r2(sd.biz)`, *n* = `r comma(n.biz)`), a
+difference of `r r2(mean.pub - mean.biz)` percentage points, Welch's
+*t*(`r r2(df2)`) = `r r2(abs(t2))`, *p* `r fmt_p(p2)`,
+95% CI [`r r2(-ci2[2])`, `r r2(-ci2[1])`], *d* = `r r2(d2)`.
+
+I used Welch's version because the variances are unequal
+(*SD* = `r r2(sd.biz)` against `r r2(sd.pub)`). That gap in the standard
+deviations is misleading on its own, though. It comes from a few extreme
+business and charity returns, including the minimum of
+`r r2(gap.summary$min)`%, not from a generally wider spread: the
+interquartile ranges are close to identical (`r r2(iqr.biz)` against
+`r r2(iqr.pub)` percentage points). The real difference is how consistently
+the gap runs against women. It favours women at `r r2(neg.biz)`% of
+businesses and charities, but at only `r r2(neg.pub)`% of public sector
+employers.
+
+Since *d* = `r r2(d2)` is small, I would not say the public sector is much
+worse. The answer to the question is just that it is not better.
+
+# Caveats
+
+* The unit is the employer, so every employer counts equally whether it has
+  250 staff or 250,000. This is the mean of employer gaps, not the gap facing
+  the average UK worker.
+* The gap is a raw difference in average hourly pay. It is not a measure of
+  equal pay for equal work: it mixes pay discrimination together with
+  occupational segregation, that is, who holds the senior and the junior jobs.
+* The figures are self-reported by employers, and only employers with 250 or
+  more staff must report, so smaller employers are absent entirely.
+* `r n.clipped` employers fall outside the plotted range of Figure 1,
+  including one extreme value of `r r2(gap.summary$min)`%. All of them are
+  retained in every calculation; no observation was excluded.
+
+# Session information
+
+```{r session-info}
+sessionInfo()
+```

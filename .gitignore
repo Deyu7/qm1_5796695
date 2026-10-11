@@ -1,0 +1,19 @@
+# RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# knitr / rmarkdown intermediates
+*_files/
+*_cache/
+*.knit.md
+*.utf8.md
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Office lock files
+~$*

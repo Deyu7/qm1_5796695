@@ -1,0 +1,272 @@
+---
+title: "Bike Sharing Regression Exercise"
+subtitle: "Replication code"
+author: "Deyu Wang (5796695)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center")
+```
+
+```{r packages}
+library(tidyverse)
+library(broom)
+library(knitr)
+```
+
+```{r helpers}
+r1 <- function(x) formatC(x, format = "f", digits = 1)
+r2 <- function(x) formatC(x, format = "f", digits = 2)
+fmt_p <- function(p) {
+  if (p < .001) "< .001" else paste0("= ", sub("^0", "", sprintf("%.3f", p)))
+}
+# one row of a regression table (estimate, CI, t, p) for one predictor
+coef_row <- function(model, x) tidy(model, conf.int = TRUE) %>% filter(term == x)
+```
+
+# 1. Read the data
+
+```{r read}
+days <- read_csv("day.csv")
+days
+```
+
+There are `r nrow(days)` days, from `r format(min(days$dteday), "%d %B %Y")` to `r format(max(days$dteday), "%d %B %Y")`.
+
+# 2. Data dictionary
+
+| Variable | Description |
+|:--|:--|
+| `instant` | Row index |
+| `dteday` | Date |
+| `season` | Season (1 = spring, 2 = summer, 3 = fall, 4 = winter) |
+| `yr` | Year (0 = 2011, 1 = 2012) |
+| `mnth` | Month (1 to 12) |
+| `holiday` | 1 if the day is a holiday |
+| `weekday` | Day of the week (0 = Sunday) |
+| `workingday` | 1 if the day is neither a weekend nor a holiday |
+| `weathersit` | Weather (1 = clear or partly cloudy, 2 = mist or cloudy, 3 = light rain or snow, 4 = heavy rain, snow or fog) |
+| `temp` | Normalised temperature, (t - t_min) / (t_max - t_min) with t_min = -8 and t_max = 39 °C |
+| `atemp` | Normalised "feels like" temperature, t_min = -16 and t_max = 50 °C |
+| `hum` | Humidity divided by 100 |
+| `windspeed` | Wind speed divided by 67 (the maximum) |
+| `casual` | Number of rentals by casual users |
+| `registered` | Number of rentals by registered users |
+| `cnt` | Total number of rentals (casual + registered) |
+
+# 3. Unnormalised temperature and wind speed
+
+Reversing the normalisation: temperature = -8 + (39 - (-8)) × `temp`, and wind speed = 67 × `windspeed`.
+
+```{r unnormalise}
+days <- days %>%
+  mutate(temp.in.C = -8 + (39 - (-8)) * temp,
+         windspeed.in.mph = windspeed * 67)
+
+descriptives <- days %>%
+  select(cnt, temp.in.C, windspeed.in.mph) %>%
+  pivot_longer(everything(), names_to = "variable") %>%
+  group_by(variable) %>%
+  summarise(mean = mean(value), sd = sd(value),
+            min = min(value), max = max(value))
+kable(descriptives, digits = 1)
+```
+
+# 4. Univariate plots
+
+```{r histograms, fig.width=6, fig.height=3.5}
+ggplot(days, aes(x = cnt)) +
+  geom_histogram(binwidth = 250) +
+  labs(x = "Number of bikes rented per day", y = "Frequency")
+
+ggplot(days, aes(x = temp.in.C)) +
+  geom_histogram(binwidth = 1) +
+  labs(x = "Temperature (°C)", y = "Frequency")
+
+ggplot(days, aes(x = windspeed.in.mph)) +
+  geom_histogram(binwidth = 1) +
+  labs(x = "Wind speed (mph)", y = "Frequency")
+```
+
+Rentals are spread fairly evenly between about 1,000 and 8,000 a day. Temperature covers `r r1(min(days$temp.in.C))` to `r r1(max(days$temp.in.C))` °C. Wind speed is right skewed, with most days between 5 and 20 mph.
+
+# 5. Bivariate plots
+
+```{r scatterplots, fig.width=6, fig.height=4}
+ggplot(days, aes(x = temp.in.C, y = cnt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth() +
+  labs(x = "Temperature (°C)", y = "Number of bikes rented")
+
+ggplot(days, aes(x = windspeed.in.mph, y = cnt)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth() +
+  labs(x = "Wind speed (mph)", y = "Number of bikes rented")
+
+ggplot(days, aes(x = windspeed.in.mph, y = temp.in.C)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth() +
+  labs(x = "Wind speed (mph)", y = "Temperature (°C)")
+```
+
+Rentals go up with temperature, but the curve flattens off and turns down at the hottest temperatures. Rentals go down a little as wind speed goes up. Temperature and wind speed are not strongly related.
+
+# 6. Correlations
+
+```{r correlations}
+cors <- cor(select(days, cnt, temp.in.C, windspeed.in.mph))
+round(cors, 2)
+```
+
+The correlation between temperature and wind speed is only `r r2(cors["temp.in.C", "windspeed.in.mph"])`. This is good because it means the two predictors are not very collinear. If they were highly correlated, the regression could not separate the effect of one from the effect of the other, and the coefficients in the multiple regression would have large standard errors and be unstable.
+
+# 7. Regressions
+
+```{r regressions}
+m.cnt.by.windspeed <- lm(cnt ~ windspeed.in.mph, data = days)
+m.cnt.by.temp <- lm(cnt ~ temp.in.C, data = days)
+m.cnt.by.windspeed.temp <- lm(cnt ~ windspeed.in.mph + temp.in.C, data = days)
+
+summary(m.cnt.by.windspeed)
+cbind(coef(m.cnt.by.windspeed), confint(m.cnt.by.windspeed))
+
+summary(m.cnt.by.temp)
+cbind(coef(m.cnt.by.temp), confint(m.cnt.by.temp))
+
+summary(m.cnt.by.windspeed.temp)
+cbind(coef(m.cnt.by.windspeed.temp), confint(m.cnt.by.windspeed.temp))
+```
+
+All three models in one table (this is Table 1 in the write-up):
+
+```{r table-1}
+models <- list(`Wind speed only` = m.cnt.by.windspeed,
+               `Temperature only` = m.cnt.by.temp,
+               `Wind speed and temperature` = m.cnt.by.windspeed.temp)
+
+coef.table <- map_dfr(models, ~ tidy(.x, conf.int = TRUE), .id = "model") %>%
+  mutate(cell = paste0(r1(estimate), " [", r1(conf.low), ", ", r1(conf.high), "]"),
+         term = recode(term, `(Intercept)` = "Intercept",
+                       windspeed.in.mph = "Wind speed (mph)",
+                       temp.in.C = "Temperature (°C)")) %>%
+  select(model, term, cell) %>%
+  pivot_wider(names_from = model, values_from = cell, values_fill = "")
+
+fit.table <- tibble(term = "R²", !!!map(models, ~ r2(summary(.x)$r.squared)))
+
+table.1 <- bind_rows(coef.table, fit.table) %>% rename(` ` = term)
+kable(table.1)
+```
+
+```{r coefficients, include=FALSE}
+w1 <- coef_row(m.cnt.by.windspeed, "windspeed.in.mph")
+t1 <- coef_row(m.cnt.by.temp, "temp.in.C")
+w2 <- coef_row(m.cnt.by.windspeed.temp, "windspeed.in.mph")
+t2 <- coef_row(m.cnt.by.windspeed.temp, "temp.in.C")
+```
+
+# 8. Effect of temperature
+
+From the temperature only model, each extra degree C goes with `r r1(t1$estimate)` more bikes rented per day, 95% CI [`r r1(t1$conf.low)`, `r r1(t1$conf.high)`], *t*(`r df.residual(m.cnt.by.temp)`) = `r r2(t1$statistic)`, *p* `r fmt_p(t1$p.value)`.
+
+# 9. Effect of wind speed
+
+From the wind speed only model, each extra mph of wind goes with `r r1(-w1$estimate)` fewer bikes rented per day, 95% CI [`r r1(-w1$conf.high)`, `r r1(-w1$conf.low)`], *t*(`r df.residual(m.cnt.by.windspeed)`) = `r r2(w1$statistic)`, *p* `r fmt_p(w1$p.value)`.
+
+# 10. Temperature, holding wind speed constant
+
+Holding wind speed constant, each extra degree C goes with `r r1(t2$estimate)` more bikes, 95% CI [`r r1(t2$conf.low)`, `r r1(t2$conf.high)`], *t*(`r df.residual(m.cnt.by.windspeed.temp)`) = `r r2(t2$statistic)`, *p* `r fmt_p(t2$p.value)`. This is close to the estimate from the temperature only model.
+
+# 11. Wind speed, holding temperature constant
+
+Holding temperature constant, each extra mph of wind goes with `r r1(-w2$estimate)` fewer bikes, 95% CI [`r r1(-w2$conf.high)`, `r r1(-w2$conf.low)`], *t*(`r df.residual(m.cnt.by.windspeed.temp)`) = `r r2(w2$statistic)`, *p* `r fmt_p(w2$p.value)`. This is smaller than the `r r1(-w1$estimate)` from the wind speed only model.
+
+# 12. Why the wind speed estimate changes
+
+```{r omitted-variable}
+m.temp.by.windspeed <- lm(temp.in.C ~ windspeed.in.mph, data = days)
+coef(m.temp.by.windspeed)
+
+# change in the wind speed coefficient between the two models
+coef(m.cnt.by.windspeed)["windspeed.in.mph"] - coef(m.cnt.by.windspeed.temp)["windspeed.in.mph"]
+
+# temperature coefficient x how much colder windy days are
+coef(m.cnt.by.windspeed.temp)["temp.in.C"] * coef(m.temp.by.windspeed)["windspeed.in.mph"]
+```
+
+```{r aux-slope, include=FALSE}
+cold.per.mph <- -coef(m.temp.by.windspeed)["windspeed.in.mph"]
+```
+
+Windy days tend to be colder days: each extra mph of wind goes with `r r2(cold.per.mph)` °C lower temperature on average. Cold days have fewer rentals. When temperature is left out of the model, the wind speed coefficient picks up part of the effect of temperature, so it looks bigger than it is. Once temperature is in the model, wind speed is compared at the same temperature and its coefficient gets smaller. The two numbers above are the same, which shows the whole change in the wind speed coefficient comes from its link with temperature.
+
+The temperature coefficient hardly changes because wind speed has a much smaller effect, so leaving it out does not bias temperature much. Because the correlation between the predictors is low, both coefficients stay fairly precise in the multiple regression.
+
+# 13. Temperature or wind speed?
+
+```{r r-squared}
+r.sq <- map_dbl(models, ~ summary(.x)$r.squared)
+round(r.sq, 3)
+```
+
+Temperature on its own explains `r r1(100 * r.sq[["Temperature only"]])`% of the variance in daily rentals, while wind speed on its own explains only `r r1(100 * r.sq[["Wind speed only"]])`%. Adding wind speed to temperature only raises R² by `r r1(100 * (r.sq[["Wind speed and temperature"]] - r.sq[["Temperature only"]]))` percentage points. Temperature matters much more, so if I could only know one variable I would want to know the temperature. Wind speed still has an effect when temperature is held constant (its CI does not include zero).
+
+# 14. Temperature effect by month
+
+```{r figure-1, fig.width=8, fig.height=6}
+days <- days %>%
+  mutate(month = factor(mnth, levels = 1:12, labels = month.abb))
+
+figure.1 <- ggplot(days, aes(x = temp.in.C, y = cnt)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  geom_smooth(method = "lm") +
+  facet_wrap(~ month) +
+  labs(x = "Temperature (°C)", y = "Number of bikes rented")
+figure.1
+```
+
+Test whether the temperature slope is different in different months (temperature × month interaction):
+
+```{r interaction}
+m.cnt.by.temp.month <- lm(cnt ~ temp.in.C * month, data = days)
+anova(m.cnt.by.temp.month)
+```
+
+```{r interaction-stats, include=FALSE}
+interaction.test <- anova(m.cnt.by.temp.month)["temp.in.C:month", ]
+```
+
+The interaction is significant, *F*(`r interaction.test$Df`, `r df.residual(m.cnt.by.temp.month)`) = `r r2(interaction.test[["F value"]])`, *p* `r fmt_p(interaction.test[["Pr(>F)"]])`, so the effect of temperature depends on the month.
+
+Temperature slope for each month (same model, written so that each coefficient is the slope for one month):
+
+```{r month-slopes}
+m.slopes <- lm(cnt ~ 0 + month + month:temp.in.C, data = days)
+
+month.slopes <- tidy(m.slopes, conf.int = TRUE) %>%
+  filter(str_detect(term, ":temp.in.C")) %>%
+  mutate(month = str_remove_all(term, "month|:temp.in.C")) %>%
+  select(month, estimate, conf.low, conf.high, p.value)
+
+kable(month.slopes, digits = c(0, 1, 1, 1, 3))
+```
+
+```{r month-numbers, include=FALSE}
+slope <- function(m) month.slopes %>% filter(month == m)
+```
+
+In the colder months (October to May, apart from November) warmer days have more rentals and the confidence intervals do not include zero, for example `r r1(slope("Mar")$estimate)` more bikes per °C in March. In June and July the slope is negative (`r r1(slope("Jun")$estimate)` and `r r1(slope("Jul")$estimate)` bikes per °C), so on days that are already hot, extra heat means fewer rentals. For August, September and November the confidence intervals include zero. This matches the curve in the scatterplot in question 5: rentals rise with temperature up to the mid 20s °C and then level off or fall.
+
+# Other things to note
+
+```{r by-year}
+days %>% group_by(yr) %>% summarise(mean.cnt = mean(cnt))
+```
+
+Rentals were much higher in 2012 than in 2011, and rain, humidity and working days also affect rentals. None of these are in the models above. The data are observational, so the coefficients are associations rather than causal effects.

@@ -4,7 +4,7 @@ Do you really believe the changes in bikes against temperature slopes over month
 
 
 
-# Feedback: bike sharing regression exercise
+# AI Feedback (Claude)
 
 Excellent work. Your numbers match the model answer exactly, and your write-up is a model of how to report regressions. Every estimate has its 95% CI, $t$, degrees of freedom, and $p$ value. You also put the "fewer" estimates the right way round: "87.5 fewer rentals, 95% CI [61.1, 113.9]".
 

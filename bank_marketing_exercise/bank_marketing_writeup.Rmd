@@ -1,0 +1,102 @@
+---
+title: "Does the Month Matter in a Marketing Campaign?"
+author: "Deyu Wang (5796695)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  word_document:
+    fig_width: 6.5
+    fig_height: 4.5
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, dpi = 300)
+library(tidyverse)
+library(emmeans)
+library(knitr)
+
+r2 <- function(x) formatC(x, format = "f", digits = 2)
+pct <- function(x) formatC(100 * x, format = "f", digits = 1)
+big <- function(x) format(x, big.mark = ",")
+fmt_p <- function(p) {
+  if (p < .001) "< .001" else paste0("= ", sub("^0", "", sprintf("%.3f", p)))
+}
+
+bank <- read_delim("bank-additional-full.csv", delim = ";") %>%
+  mutate(subscribed = as.numeric(y == "yes"),
+         month = droplevels(factor(month, levels = tolower(month.abb), labels = month.abb)))
+
+m.subscribed.by.month <- glm(subscribed ~ month, family = binomial, data = bank)
+month.test <- anova(m.subscribed.by.month, test = "Chisq")
+
+predictions <- as_tibble(summary(emmeans(m.subscribed.by.month, ~ month, type = "response"))) %>%
+  select(month, prob, asymp.LCL, asymp.UCL)
+
+by.month <- bank %>%
+  group_by(month) %>%
+  summarise(contacted = n(), subscribed = sum(subscribed),
+            previous.success = mean(poutcome == "success")) %>%
+  left_join(predictions, by = "month")
+
+pred <- function(m) by.month %>% filter(month == m)
+ci <- function(row) paste0("[", pct(row$asymp.LCL), "%, ", pct(row$asymp.UCL), "%]")
+
+sep <- pred("Sep")
+odds.sep <- sep$prob / (1 - sep$prob)
+
+quiet <- by.month %>% filter(contacted < 1000)
+busy <- by.month %>% filter(contacted > 1000)
+```
+
+## Method
+
+The data were `r big(nrow(bank))` telephone contacts from the marketing campaigns of a Portuguese bank between May 2008 and November 2010 (Moro, Cortez and Rita, 2014). The outcome was whether the person subscribed to a term deposit. The predictor was the month of the last contact with the person. I fitted a logistic regression with month as a factor. The probabilities and 95% confidence intervals reported below are the predictions from this model. All analyses were run in R.
+
+## Results
+
+Overall, `r pct(mean(bank$subscribed))`% of the people contacted subscribed (`r big(sum(bank$subscribed))` of `r big(nrow(bank))`). Nobody was contacted in January or February. The probability of subscribing differed between months, $\chi^2(`r month.test["month", "Df"]`)=`r r2(month.test["month", "Deviance"])`$, *p* `r fmt_p(month.test["month", "Pr(>Chi)"])` (Table 1 and Figure 1). It was lowest in May, `r pct(pred("May")$prob)`%, 95% CI `r ci(pred("May"))`, and highest in March, `r pct(pred("Mar")$prob)`%, 95% CI `r ci(pred("Mar"))`. In March, September, October and December between `r round(100 * min(quiet$prob))`% and `r round(100 * max(quiet$prob))`% of people subscribed. In the other six months between `r round(100 * min(busy$prob))`% and `r round(100 * max(busy$prob))`% did. In September, for example, the odds of subscribing were `r r2(odds.sep)`, so about `r round(100 * odds.sep)` people subscribed for every 100 who did not.
+
+```{r table-1}
+table.1 <- by.month %>%
+  mutate(Month = month,
+         Contacted = big(contacted),
+         Subscribed = big(subscribed),
+         `Probability of subscribing [95% CI]` =
+           paste0(pct(prob), "% [", pct(asymp.LCL), "%, ", pct(asymp.UCL), "%]")) %>%
+  select(Month, Contacted, Subscribed, `Probability of subscribing [95% CI]`)
+kable(table.1, align = "lrrr", caption = "Table 1. Number of people contacted and subscribing in each month, with the probability of subscribing predicted by the logistic regression.")
+```
+
+```{r figure-1, fig.cap="Figure 1. Predicted probability of subscribing by month of last contact. Error bars are 95% confidence intervals."}
+ggplot(by.month, aes(x = month, y = prob, ymin = asymp.LCL, ymax = asymp.UCL)) +
+  geom_pointrange() +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.6)) +
+  labs(x = "Month of last contact", y = "Probability of subscribing")
+```
+
+The months with a high probability of subscribing were the months when few people were contacted (Figure 2). Fewer than `r big(ceiling(max(quiet$contacted) / 50) * 50)` people were contacted in each of March, September, October and December, compared with more than `r big(floor(min(busy$contacted) / 100) * 100)` in each of the other months and `r big(max(by.month$contacted))` in May. In those four months, `r round(100 * min(quiet$previous.success))`% to `r round(100 * max(quiet$previous.success))`% of the people contacted had subscribed in a previous campaign, compared with `r round(100 * min(busy$previous.success))`% to `r round(100 * max(busy$previous.success))`% in the other months.
+
+```{r figure-2, fig.height=5, fig.cap="Figure 2. Probability of subscribing against the number of people contacted in each month. Error bars are 95% confidence intervals."}
+# where each month label goes, so that it does not sit on a point or an error bar
+label.hjust <- c(Mar = 1.4, Apr = -0.4, May = 0.5, Jun = 0.5, Jul = -0.4, Aug = 0.5, Sep = 1.4, Oct = -0.4, Nov = 1.4, Dec = -0.4)
+label.vjust <- c(Mar = 0.5, Apr = 0.5, May = 2.2, Jun = 2.2, Jul = 0.5, Aug = -1.2, Sep = 0.5, Oct = 0.5, Nov = 0.5, Dec = 0.5)
+
+ggplot(by.month, aes(x = contacted, y = prob, ymin = asymp.LCL, ymax = asymp.UCL, label = month)) +
+  geom_errorbar(width = 0, colour = "grey40") +
+  geom_point(size = 2.5, colour = "#2C5F8A") +
+  geom_text(aes(hjust = label.hjust[as.character(month)], vjust = label.vjust[as.character(month)]), size = 4) +
+  scale_x_log10(breaks = c(200, 500, 1000, 2000, 5000, 10000), labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.6)) +
+  labs(x = "Number of people contacted in the month (log scale)",
+       y = "Probability of subscribing") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank())
+```
+
+## Discussion
+
+The probability of subscribing was very different in different months, but I do not think the calendar month itself is the reason. The bank did better in the months when it called few people. In those months it seems to have called a small, selected group, including many people who had subscribed before, and in months like May it called very large numbers of people. The campaigns also ran for two and a half years, so the same month can come from more than one year. These are observational data, so the differences between months are associations. They do not show that calling in March instead of May would make a person more likely to subscribe.
+
+## Reference
+
+Moro, S., Cortez, P. and Rita, P. (2014) 'A data-driven approach to predict the success of bank telemarketing', *Decision Support Systems*, 62, pp. 22-31.

@@ -1,0 +1,232 @@
+---
+title: "Bank Marketing Exercise"
+subtitle: "Replication code"
+author: "Deyu Wang (5796695)"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE, fig.align = "center")
+```
+
+```{r packages}
+library(tidyverse)
+library(emmeans)
+library(knitr)
+```
+
+```{r helpers}
+r2 <- function(x) formatC(x, format = "f", digits = 2)
+r4 <- function(x) formatC(x, format = "f", digits = 4)
+pct <- function(x) formatC(100 * x, format = "f", digits = 1)
+fmt_p <- function(p) {
+  if (p < .001) "< .001" else paste0("= ", sub("^0", "", sprintf("%.3f", p)))
+}
+```
+
+# 1. Read the data
+
+```{r read}
+bank <- read_delim("bank-additional-full.csv", delim = ";")
+bank
+```
+
+The columns in this file are separated by semicolons, not commas, so `read_csv()` would put every row into one column. `read_csv2()` also reads semicolons, but it expects a comma as the decimal mark, and this file uses a point (for example `93.994`). So `read_delim()` with `delim = ";"` is the right one.
+
+There are `r format(nrow(bank), big.mark = ",")` rows, one for each person contacted.
+
+# 2. Data dictionary
+
+| Variable | Description |
+|:--|:--|
+| `y` | Did the person subscribe to a term deposit? `"yes"` or `"no"` |
+| `month` | Month of the last contact with the person, `"mar"` to `"dec"` |
+
+```{r recode}
+bank <- bank %>%
+  mutate(subscribed = as.numeric(y == "yes"),
+         month = factor(month, levels = tolower(month.abb), labels = month.abb))
+count(bank, y, subscribed)
+```
+
+`subscribed` is 1 for yes and 0 for no. `month` is now a factor in calendar order.
+
+# 3. Proportion subscribing in each month
+
+```{r by-month}
+by.month <- bank %>%
+  group_by(month) %>%
+  summarise(contacted = n(), subscribed = sum(subscribed)) %>%
+  mutate(proportion = subscribed / contacted)
+kable(by.month, digits = 3)
+
+setdiff(month.abb, by.month$month)
+```
+
+January and February are missing. Nobody was contacted in those months, so I drop these two levels from the factor.
+
+```{r drop-levels}
+bank <- bank %>% mutate(month = droplevels(month))
+by.month <- by.month %>% mutate(month = droplevels(month))
+```
+
+Overall `r pct(mean(bank$subscribed))`% of people subscribed (`r format(sum(bank$subscribed), big.mark = ",")` of `r format(nrow(bank), big.mark = ",")`).
+
+# 4. Logistic regression
+
+```{r model}
+m.subscribed.by.month <- glm(subscribed ~ month, family = binomial, data = bank)
+summary(m.subscribed.by.month)
+```
+
+As an equation, `subscribed ~ month` is
+
+$$\log\left(\frac{p_i}{1-p_i}\right) = \beta_0 + \beta_{\text{Apr}} \, \text{Apr}_i + \beta_{\text{May}} \, \text{May}_i + \dots + \beta_{\text{Dec}} \, \text{Dec}_i$$
+
+where $p_i$ is the probability that person $i$ subscribes, and $\text{Apr}_i$ is 1 if person $i$ was last contacted in April and 0 if not, and so on for the other months. March is the reference level because it is the first level of `month`. So $\beta_0$ is the log odds of subscribing in March, and each of the other nine coefficients is the difference in log odds between that month and March.
+
+# 5. Does the proportion differ between months?
+
+```{r chisq}
+(month.test <- anova(m.subscribed.by.month, test = "Chisq"))
+```
+
+```{r chisq-stats, include=FALSE}
+chisq <- month.test["month", "Deviance"]
+chisq.df <- month.test["month", "Df"]
+chisq.p <- month.test["month", "Pr(>Chi)"]
+```
+
+The proportion of people subscribing differs significantly between months, $\chi^2(`r chisq.df`)=`r r2(chisq)`$, $p$ `r fmt_p(chisq.p)`.
+
+# 6. Predicted probabilities
+
+```{r predictions}
+(m.subscribed.by.month.emm <- emmeans(m.subscribed.by.month, ~ month, type = "response"))
+
+predictions <- as_tibble(summary(m.subscribed.by.month.emm)) %>%
+  select(month, prob, asymp.LCL, asymp.UCL)
+by.month <- left_join(by.month, predictions, by = "month")
+
+# there is one coefficient for each month, so the predictions are the same as the raw proportions
+all.equal(by.month$proportion, by.month$prob)
+```
+
+This is Table 1 in the write-up:
+
+```{r table-1}
+table.1 <- by.month %>%
+  mutate(Month = month,
+         Contacted = format(contacted, big.mark = ","),
+         Subscribed = format(subscribed, big.mark = ","),
+         `Probability of subscribing [95% CI]` =
+           paste0(pct(prob), "% [", pct(asymp.LCL), "%, ", pct(asymp.UCL), "%]")) %>%
+  select(Month, Contacted, Subscribed, `Probability of subscribing [95% CI]`)
+kable(table.1, align = "lrrr")
+```
+
+```{r figure-1, fig.width=7, fig.height=4.5}
+figure.1 <- ggplot(by.month, aes(x = month, y = prob, ymin = asymp.LCL, ymax = asymp.UCL)) +
+  geom_pointrange() +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.6)) +
+  labs(x = "Month of last contact", y = "Probability of subscribing")
+figure.1
+```
+
+```{r prediction-numbers, include=FALSE}
+pred <- function(m) by.month %>% filter(month == m)
+ci <- function(row) paste0("[", pct(row$asymp.LCL), "%, ", pct(row$asymp.UCL), "%]")
+```
+
+The probability of subscribing is lowest in May, `r pct(pred("May")$prob)`%, 95% CI `r ci(pred("May"))`, and highest in March, `r pct(pred("Mar")$prob)`%, 95% CI `r ci(pred("Mar"))`. March, September, October and December are all between 44% and 51%. The other six months are between 6% and 20%.
+
+# 7. Odds of a subscription in September
+
+```{r odds-sep}
+sep <- pred("Sep")
+(odds.sep <- sep$prob / (1 - sep$prob))
+
+# with a 95% CI, from the log odds
+summary(emmeans(m.subscribed.by.month, ~ month)) %>%
+  as_tibble() %>%
+  filter(month == "Sep") %>%
+  mutate(odds = exp(emmean), odds.LCL = exp(asymp.LCL), odds.UCL = exp(asymp.UCL)) %>%
+  select(month, odds, odds.LCL, odds.UCL)
+```
+
+The odds of a subscription in September are `r r2(odds.sep)`. Odds are the number of people who subscribed divided by the number who did not. So for every 100 people contacted in September who did not subscribe, about `r round(100 * odds.sep)` did. The odds are below 1 because fewer than half subscribed (`r sep$subscribed` out of `r sep$contacted`).
+
+# 8. September by hand
+
+```{r by-hand}
+(b <- coef(summary(m.subscribed.by.month))[c("(Intercept)", "monthSep"), "Estimate"])
+
+log.odds.sep <- b[["(Intercept)"]] + b[["monthSep"]]
+odds.sep.by.hand <- exp(log.odds.sep)
+prob.sep.by.hand <- odds.sep.by.hand / (1 + odds.sep.by.hand)
+c(log.odds = log.odds.sep, odds = odds.sep.by.hand, prob = prob.sep.by.hand)
+```
+
+Log odds: intercept + September coefficient = `r r4(b[["(Intercept)"]])` + (`r r4(b[["monthSep"]])`) = `r r4(log.odds.sep)`
+
+Odds: $\mathrm{e}^{`r r4(log.odds.sep)`}$ = `r r4(odds.sep.by.hand)`
+
+Probability: odds / (1 + odds) = `r r4(odds.sep.by.hand)` / `r r4(1 + odds.sep.by.hand)` = `r r4(prob.sep.by.hand)`
+
+This is the same as the prediction from `emmeans()` in question 6, `r r4(sep$prob)`.
+
+# 9. Why does the proportion vary over months?
+
+```{r contacted}
+by.month %>% select(month, contacted, proportion) %>% arrange(contacted)
+cor(log(by.month$contacted), by.month$proportion)
+```
+
+The four months with the highest proportions (March, September, October and December) are the four months with the fewest people contacted, all under 750. In the other months more than 2,600 people were contacted, and in May `r format(max(by.month$contacted), big.mark = ",")`.
+
+```{r figure-2, fig.width=7, fig.height=5}
+# where each month label goes, so that it does not sit on a point or an error bar
+label.hjust <- c(Mar = 1.4, Apr = -0.4, May = 0.5, Jun = 0.5, Jul = -0.4, Aug = 0.5, Sep = 1.4, Oct = -0.4, Nov = 1.4, Dec = -0.4)
+label.vjust <- c(Mar = 0.5, Apr = 0.5, May = 2.2, Jun = 2.2, Jul = 0.5, Aug = -1.2, Sep = 0.5, Oct = 0.5, Nov = 0.5, Dec = 0.5)
+
+figure.2 <- ggplot(by.month, aes(x = contacted, y = prob, ymin = asymp.LCL, ymax = asymp.UCL, label = month)) +
+  geom_errorbar(width = 0, colour = "grey40") +
+  geom_point(size = 2.5, colour = "#2C5F8A") +
+  geom_text(aes(hjust = label.hjust[as.character(month)], vjust = label.vjust[as.character(month)]), size = 4) +
+  scale_x_log10(breaks = c(200, 500, 1000, 2000, 5000, 10000), labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 0.6)) +
+  labs(x = "Number of people contacted in the month (log scale)",
+       y = "Probability of subscribing") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid.minor = element_blank())
+figure.2
+```
+
+The fewer people the bank contacted in a month, the higher the proportion who subscribed. I do not think the calendar month itself is the reason. It looks more like the bank called different kinds of people in different months: a small selected group in the quiet months, and very large numbers of people in months like May.
+
+One more column in the data supports this. `poutcome` is the outcome of the previous campaign for that person.
+
+```{r poutcome}
+previous.success <- bank %>%
+  group_by(month) %>%
+  summarise(contacted = n(),
+            proportion.subscribed = mean(subscribed),
+            proportion.previous.success = mean(poutcome == "success"))
+kable(previous.success, digits = 3)
+```
+
+```{r poutcome-numbers, include=FALSE}
+quiet <- previous.success %>% filter(contacted < 1000)
+busy <- previous.success %>% filter(contacted > 1000)
+```
+
+In the four quiet months, `r round(100 * min(quiet$proportion.previous.success))`% to `r round(100 * max(quiet$proportion.previous.success))`% of the people contacted had subscribed in a previous campaign. In the other months it was `r round(100 * min(busy$proportion.previous.success))`% to `r round(100 * max(busy$proportion.previous.success))`%. So the people called in the quiet months were probably more likely to say yes in any month.
+
+# Other things to note
+
+The campaigns ran from May 2008 to November 2010, so the same month can come from more than one year. With only `y` and `month` I cannot separate the month from the year or from who was called. The data are observational, so the differences between months are associations, not the effect of calling in a particular month.
